@@ -114,6 +114,12 @@ class BuildTest(unittest.TestCase):
         code, run = self.run_build(items, os.path.join(self.d, "o2"))
         self.assertEqual((code, run["status"]), (0, "unchanged"))
         self.assertFalse(os.path.exists(os.path.join(self.d, "o2", "cameras.db")))
+        with open(os.path.join(self.d, "o2", "version.json"), encoding="utf-8") as f:
+            v2 = json.load(f)
+        with open(os.path.join(self.d, "prev", "version.json"), encoding="utf-8") as f:
+            v1 = json.load(f)
+        self.assertEqual(v2["version"], v1["version"])        # 버전은 그대로, 확인 시각만 새로
+        self.assertEqual(v2["checked_at"], run["run_at"])
 
         # 추가 1, 삭제 1, 변경 1
         items2 = items[1:] + [item("NEW", 36.0, 128.0)]

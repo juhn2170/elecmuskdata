@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write   # Release 게시, 실행 기록 커밋
+  issues: write     # 실패하면 이슈를 열어 메일로 알림
   actions: write    # 워크플로 재활성화 (60일 무활동 대비)
 
 concurrency:
@@ -70,6 +71,30 @@ jobs:
           if [ -f out/patch.json.gz ]; then gh release upload "$TAG" out/patch.json.gz --clobber; fi
           gh release upload "$TAG" out/version.json --clobber
           gh release edit "$TAG" --notes "$NOTES"
+
+      - name: 최신 확인 시각 게시 (바뀐 것 없음)
+        if: steps.build.outputs.status == 'unchanged'
+        run: gh release upload "$TAG" out/version.json --clobber
+
+      - name: 실패 알림 (이슈 열기, GitHub이 메일로 알려 줌)
+        if: failure() || steps.build.outputs.status == 'blocked'
+        run: |
+          TITLE="카메라 데이터 수집 실패 $(TZ=Asia/Seoul date +%F)"
+          BODY="실행: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          앱은 마지막 게시본으로 계속 알림을 줍니다. 서비스키 만료·원본 형식 변경을 먼저 확인하세요."
+          OPEN=$(gh issue list --label collect-failure --state open --json number -q '.[0].number' || true)
+          if [ -n "$OPEN" ]; then gh issue comment "$OPEN" --body "$BODY"
+          else
+            gh label create collect-failure --color B60205 2>/dev/null || true
+            gh issue create --title "$TITLE" --body "$BODY" --label collect-failure
+          fi
+
+      - name: 성공하면 실패 이슈 닫기
+        if: success() && (steps.build.outputs.status == 'published' || steps.build.outputs.status == 'unchanged')
+        run: |
+          for n in $(gh issue list --label collect-failure --state open --json number -q '.[].number'); do
+            gh issue close "$n" --comment "다음 실행에서 정상 수집됨"
+          done
 
       - name: 실행 기록 커밋
         if: always()

@@ -593,6 +593,8 @@ def build(raw_path: str, prev_dir: str, out_dir: str, kec_path: str | None = Non
         return finish("blocked", f"첫 게시인데 {count}건뿐 (최소 {MIN_ROWS})", 2)
 
     if prev_version and prev_version.get("data_hash") == data_hash:
+        # 바뀐 게 없어도 "오늘 원본과 대조해 최신임"을 앱에 알린다 (version.json만 다시 올림, 버전은 그대로).
+        write_json(os.path.join(out_dir, "version.json"), dict(prev_version, checked_at=run["run_at"]))
         return finish("unchanged", f"{count}건, 바뀐 것 없음", 0)
 
     version = now.strftime("%Y%m%d.%H%M")
@@ -634,6 +636,7 @@ def build(raw_path: str, prev_dir: str, out_dir: str, kec_path: str | None = Non
         "schema_version": SCHEMA_VERSION,
         "version": version,
         "generated_at": run["run_at"],
+        "checked_at": run["run_at"],
         "count": count,
         "speed_count": speed_count,
         "data_hash": data_hash,
