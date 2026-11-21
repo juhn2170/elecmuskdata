@@ -287,6 +287,22 @@ def section_len_km(c: dict) -> float | None:
     return v / 1000 if v > 100 else v   # 원본에 m로 적힌 것(15834.0)이 섞여 있다
 
 
+# 도로공사 방향(목적지) 이름 → 대략 좌표 (시·군 중심, 2026-11-22). 좌표로 맞추기(geo)에서 "끝이 목적지 쪽"인지만 본다.
+DESTINATION = {
+    "강릉": (37.75, 128.88), "고창": (35.43, 126.70), "공주": (36.45, 127.12), "광주": (35.16, 126.85),
+    "기장": (35.24, 129.22), "김해": (35.23, 128.89), "남이": (36.55, 127.47), "논산": (36.19, 127.10),
+    "당진": (36.89, 126.63), "대구": (35.87, 128.60), "대전": (36.35, 127.38), "목포": (34.81, 126.39),
+    "부산": (35.18, 129.08), "서울": (37.57, 126.98), "서천": (36.08, 126.69), "세종": (36.48, 127.29),
+    "순천": (34.95, 127.49), "양양": (38.08, 128.62), "양평": (37.49, 127.49), "영덕": (36.42, 129.37),
+    "영암": (34.80, 126.70), "완주": (35.90, 127.16), "울산": (35.54, 129.31), "익산": (35.95, 126.96),
+    "인천": (37.46, 126.71), "창원": (35.23, 128.68), "천안": (36.81, 127.11), "청주": (36.64, 127.49),
+    "춘천": (37.88, 127.73), "통영": (34.85, 128.43), "퇴계원": (37.65, 127.14), "파주": (37.76, 126.78),
+    "판교": (37.39, 127.11), "평택": (36.99, 127.11), "포천": (37.89, 127.20), "포항": (36.02, 129.34),
+    "하남": (37.54, 127.21), "함양": (35.52, 127.73), "현풍": (35.69, 128.45), "화도": (37.65, 127.30),
+    "회덕": (36.39, 127.43),
+}
+
+
 def match_sections(sections: list[dict], cameras: list[dict]) -> list[dict]:
     """도로공사 데이터에는 좌표가 없다. 표준데이터의 구간단속 카메라(시점 1, 종점 2) 중에서 찾는다 (기획서 5.3, 🟡).
 
@@ -294,6 +310,10 @@ def match_sections(sections: list[dict], cameras: list[dict]) -> list[dict]:
     2) pair: 한쪽만 찾았으면, 같은 노선의 반대쪽(시점↔종점) 카메라 중 직선거리가 구간 길이와 맞는 것.
     3) name: 둘 다 못 찾았으면, 설치장소·방향 문구에 시점·종점 시설물 이름(덕평SA → '덕평')이 있고
        직선거리가 구간 길이와 맞는 시점·종점 카메라 쌍.
+    4) geo: 그래도 못 찾았으면 (2026-11-22, 설치장소에 이정·시설물 이름이 없는 카메라), 같은 노선에서 다른 구간에 쓰이지 않은
+       시점(1)·종점(2) 카메라 쌍 중 직선거리가 구간 길이의 0.6~1.05배이고, 시점→종점이 방향(목적지) 쪽으로 가며,
+       카메라에 적힌 구간 길이·이정이 있으면 그것도 맞는 쌍. 후보가 여러 곳이면 카메라 구간 길이로 확인된 것만 쓴다.
+       같은 노선의 다른 못 찾은 구간도 같은 카메라를 후보로 가지면 (예: 동해선 부산포항·포항영덕) 어느 쪽인지 모르므로 둘 다 쓰지 않는다.
     후보가 여러 개면 가장 그럴듯한 것을 쓰고 ambiguous=1로 표시한다. method에 찾은 방법을 남긴다."""
     pool = []
     for c in cameras:
@@ -389,6 +409,53 @@ def match_sections(sections: list[dict], cameras: list[dict]) -> list[dict]:
         """후보가 서로 다른 곳에 있는지 (같은 자리의 차로별 카메라는 하나로 본다)."""
         return any(distance_km(cands[0], c) > 0.3 for c in cands[1:])
 
+    by_key = {p["c"]["key"]: p["c"] for p in pool}
+
+    def cams_by_key(o: dict) -> list[dict]:
+        return [by_key[k] for k in (o["start_key"], o["end_key"]) if k in by_key]
+
+    def finish(s: dict, start: dict | None, end: dict | None, ambiguous: bool, method: str | None) -> dict:
+        limits = [c["limit_kmh"] for c in (start, end) if c and c["limit_kmh"]]
+        return dict(s, start_key=start and start["key"], end_key=end and end["key"],
+                    limit_kmh=min(limits) if limits else None,
+                    match="both" if start and end else "start" if start else "end" if end else "none",
+                    ambiguous=int(ambiguous), source="한국도로공사", method=method)
+
+    def by_geo(s: dict, used: list[dict]) -> list[tuple[float, dict, dict, bool]]:
+        L = s["length_km"]
+        if not L:
+            return []
+        dest = DESTINATION.get(s["direction"] or "")
+        free = [p for p in pool if not any(distance_km(p["c"], u) < 0.05 for u in used)]
+
+        def km_ok(p: dict, pos: str) -> bool:
+            """설치장소에 이정이 적혀 있으면 구간 이정과 맞아야 한다 (이정 체계가 다른 노선·옆 구간 카메라를 거름)."""
+            want = s["start_km"] if pos == "1" else s["end_km"]
+            return p["km"] is None or want is None or abs(p["km"] - want) <= 2 * MATCH_KM
+
+        starts = [p["c"] for p in free if usable(p, s, "1", strict=True) and km_ok(p, "1")]
+        ends = [p["c"] for p in free if usable(p, s, "2", strict=True) and km_ok(p, "2")]
+        tol = max(1.5, 0.2 * L)
+        found = []
+        for cs in starts:
+            for ce in ends:
+                d = distance_km(cs, ce)
+                if not 0.6 * L <= d <= 1.05 * L:
+                    continue
+                lens = [x for x in (section_len_km(cs), section_len_km(ce)) if x is not None]
+                if any(abs(x - L) > tol for x in lens):
+                    continue
+                if dest:
+                    dl = {"lat": dest[0], "lon": dest[1]}
+                    if distance_km(cs, dl) - distance_km(ce, dl) < 0.4 * d:
+                        continue                      # 종점이 목적지 쪽이 아님 (반대 방향 구간)
+                elif not lens:
+                    continue                          # 방향도 길이도 확인 못 함
+                sure = bool(lens)
+                score = (min(abs(x - L) for x in lens) if lens else 1.5) + abs(d - 0.9 * L) / 10
+                found.append((score, cs, ce, sure))
+        return sorted(found, key=lambda x: (*order(x[0], x[1]), x[2]["key"]))
+
     out = []
     for s in sections:
         cs, ce = by_km(s, "1"), by_km(s, "2")
@@ -409,11 +476,25 @@ def match_sections(sections: list[dict], cameras: list[dict]) -> list[dict]:
                 _, start, end = cand[0]
                 ambiguous = spread([x[1] for x in cand]) or spread([x[2] for x in cand])
                 method = "name"
-        limits = [c["limit_kmh"] for c in (start, end) if c and c["limit_kmh"]]
-        out.append(dict(s, start_key=start and start["key"], end_key=end and end["key"],
-                        limit_kmh=min(limits) if limits else None,
-                        match="both" if start and end else "start" if start else "end" if end else "none",
-                        ambiguous=int(ambiguous), source="한국도로공사", method=method))
+        out.append(finish(s, start, end, ambiguous, method))
+
+    # 4) geo: 다른 구간에 쓰인 카메라(같은 자리의 차로별 카메라 포함)는 빼고 찾는다
+    used = [c for o in out if o["match"] == "both" for c in cams_by_key(o)]
+    geo = {i: by_geo(sections[i], used) for i, o in enumerate(out) if o["match"] == "none"}
+    geo = {i: c for i, c in geo.items() if c}
+
+    def near_any(c: dict, cams: list[dict]) -> bool:
+        return any(distance_km(c, x) < 0.05 for x in cams)
+
+    for i, cand in geo.items():
+        _, start, end, sure = cand[0]
+        ambiguous = spread([x[1] for x in cand]) or spread([x[2] for x in cand])
+        if ambiguous and not sure:
+            continue                          # 여러 곳이 맞고 카메라 구간 길이로도 못 가림: 쓰지 않음
+        others = [c for j, cj in geo.items() if j != i for x in cj for c in (x[1], x[2])]
+        if near_any(start, others) or near_any(end, others):
+            continue                          # 다른 구간도 이 카메라를 노림: 어느 구간인지 모름
+        out[i] = finish(sections[i], start, end, ambiguous, "geo")
     return out
 
 

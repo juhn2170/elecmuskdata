@@ -241,6 +241,32 @@ class SectionTest(unittest.TestCase):
         self.assertEqual(seoul["start_key"], next(c["key"] for c in cams if c["manage_no"] == "S2"))
         self.assertEqual(busan["start_key"], next(c["key"] for c in cams if c["manage_no"] == "S1"))
 
+    def test_match_geo(self):
+        # 이정·시설물 이름이 없는 카메라: 좌표 거리·방향(목적지)·카메라 구간 길이로 짝을 찾는다 (2026-11-22)
+        def hw(no, place, pos, lat, length=""):
+            return build.normalize(item(no, lat, 127.0, roadKnd="고속국도", roadRouteNm="경부고속도로", itlpc=place,
+                                        regltSctnLcSe=pos, lmttVe="100", ovrspdRegltSctnLt=length))
+        cams = [
+            hw("N1", "송천리(서울 방면)", "1", 36.40, "10"),     # 남쪽 시점 → 북쪽 종점: 서울 방향
+            hw("N2", "상언리(서울 방면)", "2", 36.49, "10"),     # 약 10km
+            hw("S1", "상언리(부산 방면)", "1", 36.491, "10"),    # 반대 방향 쌍
+            hw("S2", "송천리(부산 방면)", "2", 36.401, "10"),
+            hw("K1", "경부고속도로 50.0km 시점", "1", 36.60, "10"),   # 이정이 구간과 안 맞음
+            hw("K2", "경부고속도로 59.0km 종점", "2", 36.69, "10"),
+        ]
+        build.assign_keys(cams)
+        keys = {c["manage_no"]: c["key"] for c in cams}
+        sec = lambda d, a, b: {"route": "경부선", "direction": d, "start_km": a, "end_km": b, "start_place": "가IC 인근",
+                               "end_place": "나IC 인근", "length_km": 10.5}
+        up, down = build.match_sections([sec("서울", 200.0, 210.5), sec("부산", 210.5, 200.0)], cams)
+        self.assertEqual((up["start_key"], up["end_key"], up["method"]), (keys["N1"], keys["N2"], "geo"))
+        self.assertEqual((down["start_key"], down["end_key"]), (keys["S1"], keys["S2"]))
+        # 카메라에 적힌 이정(50·59km)이 구간(300km)과 안 맞으면 쓰지 않는다
+        self.assertEqual(build.match_sections([sec("서울", 300.0, 310.5)], cams[4:])[0]["match"], "none")
+        # 같은 노선의 다른 못 찾은 구간도 같은 카메라를 노리면 둘 다 쓰지 않는다
+        a, b = build.match_sections([sec("서울", None, None), dict(sec("서울", None, None), start_place="다IC")], cams[:2])
+        self.assertEqual((a["match"], b["match"]), ("none", "none"))
+
     def test_section_kept_when_download_fails(self):
         with tempfile.TemporaryDirectory() as d:
             prev, raw, kec = os.path.join(d, "prev"), os.path.join(d, "raw.json"), os.path.join(d, "kec.csv")
