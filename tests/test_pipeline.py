@@ -163,6 +163,55 @@ class SectionTest(unittest.TestCase):
         self.assertEqual((s["limit_kmh"], s["ambiguous"]), (100, 0))
         self.assertEqual((f["match"], f["start_key"]), ("none", None))
 
+    def test_route_alias_and_km(self):
+        self.assertEqual(build.route_name("중부선"), build.route_name("통영대전고속도로"))
+        self.assertEqual(build.route_name("당진영덕선(청주영덕)"), build.route_name("상주영덕고속도로"))
+        self.assertEqual(build.route_name("호남지선"), build.route_name("호남지선고속도로"))
+        c = build.normalize(item("X", 36.5, 127.0, roadKnd="고속국도", roadRouteNm="45번 고속도로", roadRouteNo="45",
+                                 itlpc="창원방향 시점 (북충주IC → 충주IC)"))
+        self.assertEqual(build.camera_routes(c), {"중부내륙"})
+        km = lambda s: (build.KM.search(s) or [None, None])[1]
+        self.assertEqual(km("남해고속도로 96.4㎞ 시점"), "96.4")
+        self.assertIsNone(km("통도사휴게소 1km 전방 종점"))      # 거리 표기는 이정이 아님
+        self.assertIsNone(km("북천JC 1km전 종점"))
+        self.assertEqual(build.facility("덕평SA 인근"), "덕평")
+
+    def test_match_pair_and_name(self):
+        # 시점은 이정으로, 종점은 이정이 없어서 '짝'으로 찾는다 (직선거리 ≈ 구간 길이)
+        cams = [build.normalize(x) for x in (
+            self.hw("A", "서해안고속도로 302.5km 시점 (목포→서울)", "1"),
+            self.hw("B", "종점 1,2차로", "2", lat=36.58),                    # 약 8.9km
+            self.hw("C", "종점 1,2차로", "2", lat=36.75),                    # 약 27.8km: 너무 멂
+            # 이정 없음, 시설물 이름으로 찾기
+            self.hw("D", "(발안IC→비봉IC) 시점", "1", lat=37.0),
+            self.hw("E", "(발안IC→비봉IC) 종점", "2", lat=37.08),
+            self.hw("F", "(비봉IC→발안IC) 시점", "1", lat=37.08),           # 반대 방향 쌍
+            self.hw("G", "(비봉IC→발안IC) 종점", "2", lat=37.0),
+        )]
+        build.assign_keys(cams)
+        keys = {c["manage_no"]: c["key"] for c in cams}
+        pair = {"route": "서해안선", "direction": "서울", "start_km": 302.8, "end_km": None,
+                "start_place": "x", "end_place": "y", "length_km": 9.2}
+        name = {"route": "서해안선", "direction": "서울", "start_km": None, "end_km": None,
+                "start_place": "발안IC 인근", "end_place": "비봉IC 인근", "length_km": 9.5}
+        p, n = build.match_sections([pair, name], cams)
+        self.assertEqual((p["start_key"], p["end_key"], p["method"]), (keys["A"], keys["B"], "km+pair"))
+        self.assertEqual((n["start_key"], n["end_key"], n["method"]), (keys["D"], keys["E"], "name"))
+
+    def test_opposite_direction_word(self):
+        # 경부선 '서울' 방향 구간에 '부산방향' 카메라는 쓰지 않는다
+        cams = [build.normalize(item(no, lat, 127.0, roadKnd="고속국도", roadRouteNm="경부고속도로",
+                                     itlpc=place, regltSctnLcSe=pos, lmttVe="100")) for no, lat, place, pos in (
+            ("S1", 36.5, "경부고속도로 300.0K 부산방향 시점", "1"),
+            ("S2", 36.5, "경부고속도로 300.2K 서울방향 시점", "1"),
+        )]
+        build.assign_keys(cams)
+        secs = [{"route": "경부선", "direction": d, "start_km": 300.0, "end_km": None, "start_place": "a",
+                 "end_place": "b", "length_km": 10.0} for d in ("서울", "부산")]
+        seoul, busan = build.match_sections(secs, cams)
+        self.assertEqual(seoul["start_key"], next(c["key"] for c in cams if c["manage_no"] == "S2"))
+        self.assertEqual(busan["start_key"], next(c["key"] for c in cams if c["manage_no"] == "S1"))
+
     def test_section_kept_when_download_fails(self):
         with tempfile.TemporaryDirectory() as d:
             prev, raw, kec = os.path.join(d, "prev"), os.path.join(d, "raw.json"), os.path.join(d, "kec.csv")

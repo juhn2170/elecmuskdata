@@ -183,7 +183,7 @@ CREATE TABLE section (
   route TEXT, direction TEXT, start_km REAL, end_km REAL,
   start_place TEXT, end_place TEXT, length_km REAL,
   start_key TEXT, end_key TEXT, limit_kmh INTEGER,
-  match TEXT NOT NULL, ambiguous INTEGER NOT NULL, source TEXT NOT NULL
+  match TEXT NOT NULL, ambiguous INTEGER NOT NULL, source TEXT NOT NULL, method TEXT
 );
 CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT);
 """
@@ -192,16 +192,228 @@ CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT);
 # ---------- 구간단속 (한국도로공사) ----------
 
 SECTION_COLUMNS = ["route", "direction", "start_km", "end_km", "start_place", "end_place", "length_km",
-                   "start_key", "end_key", "limit_kmh", "match", "ambiguous", "source"]
-KM = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*(?:km|k)(?![a-z가-힣])", re.I)
+                   "start_key", "end_key", "limit_kmh", "match", "ambiguous", "source", "method"]
+# 이정 표기: "302.5km", "6.8k", "96.4㎞". "IC 2km후", "1km 전방"처럼 거리를 말하는 표기는 뺀다.
+KM = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*(?:km|㎞|k)(?![a-z가-힣])(?!\s*(?:전|후|앞))", re.I)
 MATCH_KM = 1.0   # 이정(km) 차이 허용 범위
+
+# 같은 노선을 가리키는 다른 이름 (노선 번호가 같고 이정이 이어지는 것만).
+# 카메라 데이터는 옛 이름·구간 이름을, 도로공사 데이터는 현재 노선 이름을 쓴다.
+ROUTE_ALIAS = {
+    "통영대전": "통영대전중부", "중부": "통영대전중부", "대전통영중부": "통영대전중부",
+    "대전통영": "통영대전중부", "통영대전중부": "통영대전중부",
+    "대전당진": "당진영덕", "당진대전": "당진영덕", "청주영덕": "당진영덕", "상주영덕": "당진영덕",
+    "청원상주": "당진영덕",
+    "대구포항": "새만금포항", "익산장수": "새만금포항", "익산포항": "새만금포항",
+    "천안논산": "호남",
+    "서울외곽순환": "수도권제1순환", "제2순환": "수도권제2순환",
+    "부산외곽순환도로": "부산외곽순환", "구리포천": "세종포천",
+    "남해고속도로제2지": "남해제2지", "중앙고속도로지": "중앙지", "호남지선": "호남지",
+    "중부내륙지선로": "중부내륙지",
+}
+# 노선 이름이 비어 있을 때("45번 고속도로", "고속도로")만 쓰는 노선 번호
+ROUTE_NO = {
+    "1": "경부", "10": "남해", "12": "광주대구", "14": "함양울산", "15": "서해안", "16": "울산",
+    "20": "새만금포항", "25": "호남", "27": "순천완주", "29": "세종포천", "30": "당진영덕",
+    "35": "통영대전중부", "37": "제2중부", "40": "평택제천", "45": "중부내륙", "50": "영동",
+    "55": "중앙", "60": "서울양양", "65": "동해", "100": "수도권제1순환", "104": "남해제2지",
+    "251": "호남지", "400": "수도권제2순환", "451": "중부내륙지", "551": "중앙지", "600": "부산외곽순환",
+}
+PLACE_ROUTE = re.compile(r"([가-힣0-9]{2,}?)간?(?:고속도로|고속국도|선)(?=[\s(\d_]|$)")
+FACILITY = re.compile(r"(?:IC|JCT|JC|SA|TG|TN|터널|분기점|나들목|휴게소|요금소|졸음쉼터|교)$", re.I)
 
 
 def route_name(s: str | None) -> str:
-    """'서해안선', '서해안고속도로', '15번 서해안고속도로' → '서해안'."""
+    """'서해안선', '서해안고속도로', '15번 서해안고속도로' → '서해안'. 옛 이름은 현재 노선 이름으로 바꾼다."""
     s = re.sub(r"\(.*?\)", "", s or "")
-    s = re.sub(r"^\d+번\s*", "", s.strip()).replace(" ", "")
-    return re.sub(r"(고속도로|선)$", "", s)
+    s = re.sub(r"^\d+번\s*", "", s.strip()).replace(" ", "").replace("-", "")
+    s = re.sub(r"(고속도로|고속국도)$", "", s)
+    s = ROUTE_ALIAS.get(s, s)
+    s = re.sub(r"선$", "", s)
+    return ROUTE_ALIAS.get(s, s)
+
+
+def camera_routes(c: dict) -> set[str]:
+    """카메라가 속한 노선 이름들. 도로노선명, 설치장소에 적힌 노선명, (이름이 없으면) 노선번호에서 모은다."""
+    out = set()
+    name = route_name(c["road_name"])
+    if name and not name.endswith("로"):
+        out.add(name)
+    for m in PLACE_ROUTE.finditer((c["place"] or "").replace(" ", "").replace("-", "")):
+        r = route_name(m.group(1))
+        if r and r != "고속":
+            out.add(r)
+    if not out and is_highway(c):
+        no = re.sub(r"\D", "", c["road_no"] or "") or (re.match(r"(\d+)번", c["road_name"] or "") or [None, None])[1]
+        if no in ROUTE_NO:
+            out.add(ROUTE_NO[no])
+    return out
+
+
+def is_highway(c: dict) -> bool:
+    return c["road_kind"] == "고속국도" or "고속도로" in (c["road_name"] or "")
+
+
+DIRECTION_WORD = re.compile(r"([가-힣]{2,})\s*(?:방향|방면)")
+
+
+def facility(s: str | None) -> str | None:
+    """'덕평SA 인근' → '덕평', '양서2 TN' → '양서2'. 두 글자 미만이면 None."""
+    s = re.sub(r"(인근|입구|출구|부근|\s)", "", s or "")
+    s = FACILITY.sub("", s)
+    return s.lower() if len(s) >= 2 else None
+
+
+def distance_km(a: dict, b: dict) -> float:
+    p1, p2 = math.radians(a["lat"]), math.radians(b["lat"])
+    dp, dl = p2 - p1, math.radians(b["lon"] - a["lon"])
+    h = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * 6371.0 * math.asin(math.sqrt(h))
+
+
+def fits_length(a: dict, b: dict, length: float | None) -> bool:
+    """시점·종점 카메라 사이 직선거리가 구간 길이와 맞는지. 도로는 굽으므로 직선거리는 더 짧을 수 있다."""
+    if not length:
+        return False
+    d = distance_km(a, b)
+    return 0.5 * length <= d <= length * 1.1 + 2.0
+
+
+def section_len_km(c: dict) -> float | None:
+    v = c["section_len"]
+    if not v:
+        return None
+    return v / 1000 if v > 100 else v   # 원본에 m로 적힌 것(15834.0)이 섞여 있다
+
+
+def match_sections(sections: list[dict], cameras: list[dict]) -> list[dict]:
+    """도로공사 데이터에는 좌표가 없다. 표준데이터의 구간단속 카메라(시점 1, 종점 2) 중에서 찾는다 (기획서 5.3, 🟡).
+
+    1) km: 같은 노선 + 설치장소에 적힌 이정이 1km 이내 + 시점/종점 구분이 맞고 + 방향이 반대가 아닌 것.
+    2) pair: 한쪽만 찾았으면, 같은 노선의 반대쪽(시점↔종점) 카메라 중 직선거리가 구간 길이와 맞는 것.
+    3) name: 둘 다 못 찾았으면, 설치장소·방향 문구에 시점·종점 시설물 이름(덕평SA → '덕평')이 있고
+       직선거리가 구간 길이와 맞는 시점·종점 카메라 쌍.
+    후보가 여러 개면 가장 그럴듯한 것을 쓰고 ambiguous=1로 표시한다. method에 찾은 방법을 남긴다."""
+    pool = []
+    for c in cameras:
+        if not is_highway(c) or c["section_pos"] not in ("1", "2", None):
+            continue
+        routes = camera_routes(c)
+        if not routes:
+            continue
+        m = KM.search(c["place"] or "")
+        text_ = ((c["place"] or "") + " " + (c["direction_text"] or "")).replace(" ", "").lower()
+        pool.append({"c": c, "routes": routes, "km": float(m.group(1)) if m else None, "text": text_})
+
+    # 노선마다 도로공사 데이터에 나오는 방향(목적지) 이름. 경부선이면 {서울, 부산}.
+    # 합친 이름(통영대전중부)이 아니라 도로공사 노선 이름별로 모은다: 중부선은 {남이, 하남}, 통영대전선은 {대전, 통영}.
+    directions: dict[str, set[str]] = {}
+    for s in sections:
+        if s["direction"]:
+            directions.setdefault(s["route"], set()).add(s["direction"])
+
+    def opposite_direction(c: dict, kec_route: str, d: str | None) -> bool:
+        """방향 문구 'A→B'에서 KEC 방향(목적지)이 왼쪽에만 있거나,
+        설치장소에 같은 노선의 다른 방향 이름('부산방향')만 적혀 있으면 반대 방향."""
+        if not d:
+            return False
+        dt = c["direction_text"]
+        if dt and "→" in dt:
+            left, right = dt.split("→", 1)
+            if d in left and d not in right:
+                return True
+        words = DIRECTION_WORD.findall(c["place"] or "")
+        others = directions.get(kec_route, set()) - {d}
+        return bool(words) and not any(d in w for w in words) and any(o in w for w in words for o in others)
+
+    def usable(p: dict, s: dict, pos: str, strict: bool = False) -> bool:
+        """strict: 시점/종점 구분이 적힌 카메라만 (km로 찾지 않은 경우)."""
+        c = p["c"]
+        pos_ok = c["section_pos"] == pos or (not strict and c["section_pos"] is None)
+        return route_name(s["route"]) in p["routes"] and pos_ok and not opposite_direction(c, s["route"], s["direction"])
+
+    def order(score: float, c: dict) -> tuple:
+        """점수가 같으면 시점/종점이 적힌 카메라, 그다음 키 순서."""
+        return (round(score, 6), c["section_pos"] is None, c["key"])
+
+    def by_km(s: dict, pos: str) -> list[tuple[float, dict]]:
+        km = s["start_km"] if pos == "1" else s["end_km"]
+        if km is None:
+            return []
+        found = [(abs(p["km"] - km), p["c"]) for p in pool
+                 if p["km"] is not None and abs(p["km"] - km) <= MATCH_KM and usable(p, s, pos)]
+        return sorted(found, key=lambda x: order(*x))
+
+    def by_pair(s: dict, known: dict, pos: str) -> list[tuple[float, dict]]:
+        """known의 짝. 구간 길이와 카메라에 적힌 구간 길이가 가까울수록, 직선거리가 길이에 가까울수록 앞.
+        한쪽을 이정으로 찾았으니 이 노선은 이정 체계가 같다: 짝에 이정이 적혀 있으면 그것도 맞아야 한다."""
+        L = s["length_km"]
+        want_km = s["end_km"] if pos == "2" else s["start_km"]
+        found = []
+        for p in pool:
+            c = p["c"]
+            if c is known or not usable(p, s, pos, strict=True) or not fits_length(known, c, L):
+                continue
+            if p["km"] is not None and want_km is not None and abs(p["km"] - want_km) > 2 * MATCH_KM:
+                continue
+            sl = section_len_km(c)
+            if sl is not None and abs(sl - L) > max(1.5, 0.2 * L):
+                continue
+            found.append(((abs(sl - L) if sl is not None else 1.5) + abs(distance_km(known, c) - 0.9 * L) / 10, c))
+        return sorted(found, key=lambda x: order(*x))
+
+    def by_name(s: dict) -> list[tuple[float, dict, dict]]:
+        a, b = facility(s["start_place"]), facility(s["end_place"])
+        if not a or not b or a == b:
+            return []
+        starts = [p for p in pool if usable(p, s, "1", strict=True) and (a in p["text"] or b in p["text"])]
+        ends = [p for p in pool if usable(p, s, "2", strict=True) and (a in p["text"] or b in p["text"])]
+        found = []
+        for ps in starts:
+            for pe in ends:
+                cs, ce = ps["c"], pe["c"]
+                joined = ps["text"] + pe["text"]
+                if a not in joined or b not in joined or not fits_length(cs, ce, s["length_km"]):
+                    continue
+                # 방향 문구가 있으면 '시점→종점' 순서여야 한다 (반대면 반대 방향 구간)
+                dt = (cs["direction_text"] or ce["direction_text"] or "").replace(" ", "").lower()
+                if "→" in dt:
+                    left, right = dt.split("→", 1)
+                    if not (a in left and b in right):
+                        continue
+                found.append((abs(distance_km(cs, ce) - 0.9 * s["length_km"]) / 10, cs, ce))
+        return sorted(found, key=lambda x: (*order(x[0], x[1]), x[2]["section_pos"] is None, x[2]["key"]))
+
+    def spread(cands: list[dict]) -> bool:
+        """후보가 서로 다른 곳에 있는지 (같은 자리의 차로별 카메라는 하나로 본다)."""
+        return any(distance_km(cands[0], c) > 0.3 for c in cands[1:])
+
+    out = []
+    for s in sections:
+        cs, ce = by_km(s, "1"), by_km(s, "2")
+        start, end = (cs[0][1] if cs else None), (ce[0][1] if ce else None)
+        ambiguous = spread([c for _, c in cs]) or spread([c for _, c in ce])
+        method = "km" if start or end else None
+        if start and not end:
+            cand = by_pair(s, start, "2")
+            if cand:
+                end, ambiguous, method = cand[0][1], ambiguous or spread([c for _, c in cand]), "km+pair"
+        elif end and not start:
+            cand = by_pair(s, end, "1")
+            if cand:
+                start, ambiguous, method = cand[0][1], ambiguous or spread([c for _, c in cand]), "km+pair"
+        elif not start and not end:
+            cand = by_name(s)
+            if cand:
+                _, start, end = cand[0]
+                ambiguous = spread([x[1] for x in cand]) or spread([x[2] for x in cand])
+                method = "name"
+        limits = [c["limit_kmh"] for c in (start, end) if c and c["limit_kmh"]]
+        out.append(dict(s, start_key=start and start["key"], end_key=end and end["key"],
+                        limit_kmh=min(limits) if limits else None,
+                        match="both" if start and end else "start" if start else "end" if end else "none",
+                        ambiguous=int(ambiguous), source="한국도로공사", method=method))
+    return out
 
 
 def read_kec(path: str) -> list[dict]:
@@ -217,47 +429,6 @@ def read_kec(path: str) -> list[dict]:
         return out
 
 
-def match_sections(sections: list[dict], cameras: list[dict]) -> list[dict]:
-    """도로공사 데이터에는 좌표가 없다. 표준데이터의 고속도로 카메라 중
-    같은 노선 + 설치장소에 적힌 이정(km)이 1km 이내 + 시점/종점 구분이 맞고 + 방향이 반대가 아닌 것을 찾는다.
-    여러 개면 가장 가까운 것을 쓰고 ambiguous=1로 표시한다 (기획서 5.3, 🟡)."""
-    highway = []
-    for c in cameras:
-        if c["road_kind"] != "고속국도" and "고속도로" not in (c["road_name"] or ""):
-            continue
-        m = KM.search(c["place"] or "")
-        if m:
-            highway.append((route_name(c["road_name"]), float(m.group(1)), c))
-
-    def pick(s: dict, km: float | None, pos: str) -> list[tuple[float, dict]]:
-        if km is None:
-            return []
-        found = []
-        for r, ckm, c in highway:
-            if r != route_name(s["route"]) or abs(ckm - km) > MATCH_KM:
-                continue
-            if c["section_pos"] and c["section_pos"] != pos:
-                continue
-            dt, d = c["direction_text"], s["direction"]
-            if dt and "→" in dt and d:
-                left, right = dt.split("→", 1)
-                if d in left and d not in right:
-                    continue
-            found.append((abs(ckm - km), c))
-        return sorted(found, key=lambda x: (x[0], x[1]["key"]))
-
-    out = []
-    for s in sections:
-        cs, ce = pick(s, s["start_km"], "1"), pick(s, s["end_km"], "2")
-        start, end = (cs[0][1] if cs else None), (ce[0][1] if ce else None)
-        limits = [c["limit_kmh"] for c in (start, end) if c and c["limit_kmh"]]
-        out.append(dict(s, start_key=start and start["key"], end_key=end and end["key"],
-                        limit_kmh=min(limits) if limits else None,
-                        match="both" if start and end else "start" if start else "end" if end else "none",
-                        ambiguous=int(len(cs) > 1 or len(ce) > 1), source="한국도로공사"))
-    return out
-
-
 def prev_sections(prev_dir: str) -> list[dict]:
     path = os.path.join(prev_dir, "cameras.db")
     if not os.path.exists(path):
@@ -266,9 +437,10 @@ def prev_sections(prev_dir: str) -> list[dict]:
     try:
         con.row_factory = sqlite3.Row
         cols = {r[1] for r in con.execute("PRAGMA table_info(section)")}
-        if not set(SECTION_COLUMNS) <= cols:
+        if not set(SECTION_COLUMNS) - {"method"} <= cols:
             return []
-        return [dict(r) for r in con.execute(f"SELECT {','.join(SECTION_COLUMNS)} FROM section ORDER BY id")]
+        select = ",".join(c if c in cols else f"NULL AS {c}" for c in SECTION_COLUMNS)
+        return [dict(r) for r in con.execute(f"SELECT {select} FROM section ORDER BY id")]
     finally:
         con.close()
 
