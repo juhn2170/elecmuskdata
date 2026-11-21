@@ -126,6 +126,29 @@ class BuildTest(unittest.TestCase):
             v = json.load(f)
         self.assertEqual(v["db_size"], os.path.getsize(os.path.join(out3, "cameras.db")))
 
+        # 증분: 지난 DB에 패치를 적용하면 새 DB와 같은 카메라가 된다
+        self.assertIsNotNone(v["patch"])
+        with open(os.path.join(self.prev, "version.json"), encoding="utf-8") as f:
+            prev_v = json.load(f)["version"]
+        self.assertEqual(v["patch"]["from"], prev_v)
+        self.assertEqual((v["patch"]["upsert"], v["patch"]["delete"]), (2, 1))   # 추가 1 + 변경 1, 삭제 1
+        import gzip
+        with gzip.open(os.path.join(out3, "patch.json.gz"), "rt", encoding="utf-8") as f:
+            p = json.load(f)
+        con = sqlite3.connect(os.path.join(self.prev, "cameras.db"))
+        cols = p["columns"]
+        con.executemany("DELETE FROM camera WHERE key = ?", [(k,) for k in p["delete"]])
+        con.executemany(f"INSERT OR REPLACE INTO camera ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                        p["upsert"])
+        con.commit()
+        patched = con.execute(f"SELECT {','.join(cols)} FROM camera ORDER BY key").fetchall()
+        con.close()
+        con = sqlite3.connect(os.path.join(out3, "cameras.db"))
+        fresh = con.execute(f"SELECT {','.join(cols)} FROM camera ORDER BY key").fetchall()
+        con.close()
+        self.assertEqual(patched, fresh)
+        self.assertEqual(p["count"], len(fresh))
+
     def test_drop_guard(self):
         out1 = os.path.join(self.d, "o1")
         self.run_build(sample(), out1)

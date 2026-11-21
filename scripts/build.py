@@ -1,4 +1,4 @@
-"""내려받은 원본(raw.json)을 정제해서 cameras.db, version.json, changes.json, run.json 을 만든다.
+"""내려받은 원본(raw.json)을 정제해서 cameras.db, version.json, changes.json, patch.json.gz, run.json 을 만든다.
 
 사용: python scripts/build.py RAW_JSON PREV_DIR OUT_DIR [KEC_CSV]
   PREV_DIR: 지난번 Release의 cameras.db, version.json 이 있는 폴더 (없으면 첫 게시)
@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import math
@@ -495,6 +496,34 @@ def sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
+# 바뀐 행이 이보다 많으면 패치를 만들지 않는다 (앱은 전체를 받는다). 전체 DB는 약 13.6MB, 행 하나는 JSON으로 약 0.5KB.
+PATCH_MAX_ROWS = 5_000
+PATCH_FILE = "patch.json.gz"
+
+
+def write_patch(path: str, prev_version: str, version: str, rows: list[dict], upsert_keys: set[str],
+                delete_keys: set[str], sections: list[dict], meta: dict) -> dict:
+    """지난 게시본(prev_version)에서 이번 게시본으로 가는 증분 (기획서 5.6).
+    앱은 자기 DB 버전이 prev_version일 때만 쓴다. 구간(section)은 작아서(수백 행) 통째로 넣는다."""
+    patch = {
+        "format": 1,
+        "from": prev_version,
+        "to": version,
+        "columns": COLUMNS,
+        "upsert": [[r[c] for c in COLUMNS] for r in rows if r["key"] in upsert_keys],
+        "delete": sorted(delete_keys),
+        "section_columns": SECTION_COLUMNS,
+        "sections": [[s[c] for c in SECTION_COLUMNS] for s in sections],
+        "meta": {k: v if isinstance(v, str) else json.dumps(v, ensure_ascii=False) for k, v in meta.items()},
+        "count": len(rows),
+    }
+    data = json.dumps(patch, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    with gzip.GzipFile(path, "wb", mtime=0) as f:
+        f.write(data)
+    return {"from": prev_version, "file": PATCH_FILE, "sha256": sha256_file(path), "size": os.path.getsize(path),
+            "upsert": len(patch["upsert"]), "delete": len(patch["delete"])}
+
+
 def write_json(path: str, data: dict) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -575,7 +604,7 @@ def build(raw_path: str, prev_dir: str, out_dir: str, kec_path: str | None = Non
     speed_count = sum(r["is_speed"] for r in rows)
 
     db_path = os.path.join(out_dir, "cameras.db")
-    write_db(db_path, rows, {
+    meta = {
         "schema_version": str(SCHEMA_VERSION),
         "version": version,
         "generated_at": run["run_at"],
@@ -583,7 +612,20 @@ def build(raw_path: str, prev_dir: str, out_dir: str, kec_path: str | None = Non
         "dropped_coords": str(dropped),
         "ref_dates_by_institution": dict(sorted(ref_dates.items())),
         "attribution": ATTRIBUTION,
-    }, sections)
+    }
+    write_db(db_path, rows, meta, sections)
+
+    # 증분 (지난 게시본이 있고 바뀐 행이 많지 않을 때만)
+    patch_info = None
+    patch_path = os.path.join(out_dir, PATCH_FILE)
+    if os.path.exists(patch_path):
+        os.remove(patch_path)
+    upsert_keys = {k for k in new_hashes if prev_hashes.get(k) != new_hashes[k]}
+    delete_keys = prev_hashes.keys() - new_hashes.keys()
+    if prev_version and prev_hashes and prev_version.get("version") and \
+            len(upsert_keys) + len(delete_keys) <= PATCH_MAX_ROWS:
+        patch_info = write_patch(patch_path, prev_version["version"], version, rows, upsert_keys,
+                                 delete_keys, sections, meta)
 
     changes = {"version": version, "previous": (prev_version or {}).get("version"),
                "added": added, "removed": removed, "changed": changed}
@@ -599,6 +641,7 @@ def build(raw_path: str, prev_dir: str, out_dir: str, kec_path: str | None = Non
         "db_size": os.path.getsize(db_path),
         "added": added, "removed": removed, "changed": changed,
         "sections": len(sections), "sections_matched": section_matched,
+        "patch": patch_info,
         "attribution": ATTRIBUTION,
     })
     run["version"] = version

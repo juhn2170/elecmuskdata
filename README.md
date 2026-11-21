@@ -19,6 +19,7 @@ Release [`cameras-latest`](../../releases/tag/cameras-latest)
 | `cameras.db` | SQLite. `camera`(카메라), `section`(고속도로 구간단속, `method`=연결 방법), `meta`(버전, 출처, 기관별 기준일자) |
 | `version.json` | 버전, 건수, 데이터 해시, DB의 SHA-256과 크기, 변경 건수. 앱은 이것만 먼저 확인 |
 | `changes.json` | 지난 게시본 대비 추가·삭제·변경 건수 |
+| `patch.json.gz` | 지난 게시본 → 이번 게시본 증분 (바뀐·추가된 행, 지운 키, 구간 전체, meta). `version.json`의 `patch.from`이 앱의 버전과 같을 때만 쓴다. 바뀐 행이 5,000개를 넘으면 만들지 않는다 |
 
 ## 동작
 

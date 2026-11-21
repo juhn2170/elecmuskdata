@@ -66,6 +66,8 @@ jobs:
           fi
           # DB를 먼저 올리고 version.json을 마지막에 올린다 (앱이 새 버전을 보면 DB는 이미 준비됨)
           gh release upload "$TAG" out/cameras.db out/changes.json --clobber
+          # 증분 패치 (지난 게시본 → 이번). 없으면 앱은 전체를 받는다.
+          if [ -f out/patch.json.gz ]; then gh release upload "$TAG" out/patch.json.gz --clobber; fi
           gh release upload "$TAG" out/version.json --clobber
           gh release edit "$TAG" --notes "$NOTES"
 
