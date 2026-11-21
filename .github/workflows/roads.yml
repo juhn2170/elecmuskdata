@@ -1,6 +1,6 @@
 name: roads
 
-# 카메라로 이어지는 길 (OpenStreetMap). 도로는 자주 바뀌지 않아 일주일에 한 번.
+# 카메라로 이어지는 길과 둘레 길 연결망 (OpenStreetMap). 도로는 자주 바뀌지 않아 일주일에 한 번.
 on:
   schedule:
     # 매주 일요일 04:41 KST (= 토요일 19:41 UTC). 정시를 피한다.
@@ -50,13 +50,14 @@ jobs:
 
       - name: Release 게시
         run: |
-          NOTES=$(python -c "import json;v=json.load(open('out/roads.json'));print(f\"버전 {v['version']} · 카메라 {v['count']}/{v['cameras']}건 · OSM {v['osm_time']}\n\n{v['attribution']}\")")
+          NOTES=$(python -c "import json;v=json.load(open('out/roads2.json'));print(f\"버전 {v['version']} · 카메라 {v['count']}/{v['cameras']}건 · 간선 {v['edges']} · OSM {v['osm_time']}\n\n{v['attribution']}\")")
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --title "카메라로 이어지는 길 (최신)" --notes "$NOTES" --latest=false
           fi
-          # 압축본을 먼저, roads.json 을 마지막에 (앱이 새 버전을 보면 파일은 이미 준비됨)
-          gh release upload "$TAG" out/roads.db.gz --clobber
-          gh release upload "$TAG" out/roads.json --clobber
+          # 형식 2 (길 연결망).
+          # 압축본을 먼저, roads2.json 을 마지막에 (앱이 새 버전을 보면 파일은 이미 준비됨)
+          gh release upload "$TAG" out/roads2.db.gz --clobber
+          gh release upload "$TAG" out/roads2.json --clobber
           gh release edit "$TAG" --notes "$NOTES"
 
       - name: 실패 알림 (이슈 열기)
