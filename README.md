@@ -8,6 +8,7 @@ ElecMusk 앱(개인용 Tesla 앱)의 과속 카메라 알림에 사용합니다.
 - **공공데이터포털(data.go.kr) 「전국무인교통단속카메라표준데이터」**
 - 이용허락범위: **저작자표시**
 - 구간단속: **공공데이터포털 「한국도로공사_구간단속현황」** (CSV, 이용허락범위 제한 없음)
+- 도로(`roads-latest`): **© OpenStreetMap contributors**, [ODbL 1.0](https://opendatacommons.org/licenses/odbl/). `roads.db`는 OSM에서 만든 데이터베이스이므로 ODbL로 공개합니다. 원본: Geofabrik 한국 추출본.
 - 이 저장소의 데이터는 원본을 정제·가공한 것이며, 원본과 다를 수 있습니다. 실제 단속 여부를 보장하지 않습니다.
 
 ## 받는 곳
@@ -20,6 +21,13 @@ Release [`cameras-latest`](../../releases/tag/cameras-latest)
 | `version.json` | 버전, 건수, 데이터 해시, DB의 SHA-256과 크기, 변경 건수. 앱은 이것만 먼저 확인 |
 | `changes.json` | 지난 게시본 대비 추가·삭제·변경 건수 |
 | `patch.json.gz` | 지난 게시본 → 이번 게시본 증분 (바뀐·추가된 행, 지운 키, 구간 전체, meta). `version.json`의 `patch.from`이 앱의 버전과 같을 때만 쓴다. 바뀐 행이 5,000개를 넘으면 만들지 않는다 |
+
+Release [`roads-latest`](../../releases/tag/roads-latest) (매주 일요일)
+
+| 파일 | 내용 |
+|---|---|
+| `roads.db.gz` | SQLite (gzip). `approach(key, polys)`: 카메라 키 → 그 카메라로 이어지는 길 조각들 (Encoded Polyline 1e-5, 진행 방향 순서, 조각 사이 공백, 차이값은 조각을 넘어 이어짐). `meta`: 버전, OSM 기준 시각, 거리 예산 |
+| `roads.json` | 버전, 건수, 푼 파일의 SHA-256과 크기 |
 
 ## 동작
 
@@ -36,6 +44,13 @@ Release [`cameras-latest`](../../releases/tag/cameras-latest)
 5. 지난 게시본과 비교해서 바뀐 게 없으면 게시하지 않습니다.
 6. 카메라 수가 지난번보다 20% 넘게 줄면 게시하지 않고 실패로 남깁니다.
 7. 실행 결과를 `logs/runs.tsv`에 기록합니다 (365일 지난 기록은 자동 삭제).
+
+### 도로 (roads.yml, 매주)
+
+1. Geofabrik 한국 OSM(약 300MB)과 최신 `cameras.db`를 받습니다.
+2. 차가 다니는 길만 읽어 교차점에서 자르고, 일방통행을 반영해 방향 있는 간선을 만듭니다.
+3. 과속 카메라마다 25m 안의 길에 붙이고(가장 가까운 길보다 15m 안쪽이면 여럿), 거꾸로 차가 달려 그 지점에 닿는 길을 모읍니다. 거리 예산은 고속도로 1200m, 일반 600m, 어린이보호 400m이고, 카메라 길보다 한 등급 아래 길까지만 따라갑니다.
+4. 2026-11-21 기준 34,294건 중 32,979건이 길에 붙고, `roads.db`는 약 13.7MB (압축 8.6MB)입니다.
 
 ## 직접 돌려 보기
 

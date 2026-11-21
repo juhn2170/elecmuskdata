@@ -1,0 +1,84 @@
+name: roads
+
+# 카메라로 이어지는 길 (OpenStreetMap). 도로는 자주 바뀌지 않아 일주일에 한 번.
+on:
+  schedule:
+    # 매주 일요일 04:41 KST (= 토요일 19:41 UTC). 정시를 피한다.
+    - cron: "41 19 * * 6"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # Release 게시
+  issues: write     # 실패하면 이슈로 알림
+  actions: write    # 워크플로 재활성화
+
+concurrency:
+  group: roads
+  cancel-in-progress: false
+
+jobs:
+  roads:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: roads-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: pyosmium 설치
+        run: pip install "osmium==4.3.2"
+
+      - name: 테스트
+        run: python -m unittest discover -s tests
+
+      - name: 한국 OSM 받기 (Geofabrik, 약 300MB)
+        run: |
+          mkdir -p osm
+          curl -fsSL --retry 3 --retry-delay 30 -o osm/south-korea.osm.pbf \
+            https://download.geofabrik.de/asia/south-korea/south-korea-latest.osm.pbf
+
+      - name: 최신 카메라 DB 받기
+        run: gh release download cameras-latest -p cameras.db -D osm
+
+      - name: 길 뽑기
+        run: python scripts/roads.py osm/south-korea.osm.pbf osm/cameras.db out
+
+      - name: Release 게시
+        run: |
+          NOTES=$(python -c "import json;v=json.load(open('out/roads.json'));print(f\"버전 {v['version']} · 카메라 {v['count']}/{v['cameras']}건 · OSM {v['osm_time']}\n\n{v['attribution']}\")")
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "카메라로 이어지는 길 (최신)" --notes "$NOTES" --latest=false
+          fi
+          # 압축본을 먼저, roads.json 을 마지막에 (앱이 새 버전을 보면 파일은 이미 준비됨)
+          gh release upload "$TAG" out/roads.db.gz --clobber
+          gh release upload "$TAG" out/roads.json --clobber
+          gh release edit "$TAG" --notes "$NOTES"
+
+      - name: 실패 알림 (이슈 열기)
+        if: failure()
+        run: |
+          TITLE="도로 데이터 만들기 실패 $(TZ=Asia/Seoul date +%F)"
+          BODY="실행: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          앱은 마지막 게시본(없으면 지금 방식)으로 계속 알림을 줍니다."
+          OPEN=$(gh issue list --label roads-failure --state open --json number -q '.[0].number' || true)
+          if [ -n "$OPEN" ]; then gh issue comment "$OPEN" --body "$BODY"
+          else
+            gh label create roads-failure --color B60205 2>/dev/null || true
+            gh issue create --title "$TITLE" --body "$BODY" --label roads-failure
+          fi
+
+      - name: 성공하면 실패 이슈 닫기
+        if: success()
+        run: |
+          for n in $(gh issue list --label roads-failure --state open --json number -q '.[].number'); do
+            gh issue close "$n" --comment "다음 실행에서 정상 처리됨"
+          done
+
+      - name: 워크플로 재활성화 (60일 무활동 대비)
+        if: always()
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/roads.yml/enable" || true

@@ -3,3 +3,4 @@ prev/
 __pycache__/
 *.db
 .env
+osm/
