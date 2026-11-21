@@ -46,6 +46,14 @@ def mask(text: str, key: str) -> str:
     return text
 
 
+def decode(raw: bytes) -> str:
+    """응답이 UTF-8이 아니라 EUC-KR(CP949)로 오는 경우가 있다 (2026-11-21 확인)."""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp949", errors="replace")
+
+
 def get_page(key: str, page: int) -> dict:
     query = urllib.parse.urlencode(
         {"serviceKey": key, "pageNo": page, "numOfRows": PAGE_SIZE, "type": "json"}
@@ -57,7 +65,7 @@ def get_page(key: str, page: int) -> dict:
     for attempt in range(1, RETRIES + 1):
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
+                body = decode(resp.read())
         except urllib.error.HTTPError as e:
             last = f"HTTP {e.code}"
         except (urllib.error.URLError, TimeoutError, OSError) as e:
@@ -69,10 +77,12 @@ def get_page(key: str, page: int) -> dict:
                 # 인증 오류 등은 JSON 요청에도 XML로 오는 경우가 있다.
                 last = "JSON 아님: " + mask(body[:300], key).replace("\n", " ")
             else:
-                header = data.get("response", {}).get("header", {})
+                # 실제 응답은 {"header":..,"body":..} (2026-11-21 확인). "response"로 감싼 형태도 대비.
+                root = data.get("response", data)
+                header = root.get("header", {})
                 code = str(header.get("resultCode", ""))
                 if code in ("00", "0"):
-                    return data["response"]["body"]
+                    return root["body"]
                 if code == "03":  # NODATA
                     return {"items": [], "totalCount": 0}
                 last = f"resultCode={code} {header.get('resultMsg', '')}"

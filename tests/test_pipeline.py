@@ -55,6 +55,11 @@ class NormalizeTest(unittest.TestCase):
         self.assertEqual(build.direction_text("정조로 (A동→B동)"), "A동→B동")
         self.assertEqual(build.direction_text("정조로 (A동 -> B동)"), "A동→B동")
         self.assertIsNone(build.direction_text("정조로 앞"))
+        # 실데이터에서 본 형태 (2026-11-21)
+        self.assertEqual(build.direction_text("학교 앞(세류초교)(매교동→윗버드내사거리"), "매교동→윗버드내사거리")
+        self.assertEqual(build.direction_text("동성학교네거리→상동네거리"), "동성학교네거리→상동네거리")
+        self.assertEqual(build.direction_text("보호구역,쌍계오거리→쌍계삼거리"), "쌍계오거리→쌍계삼거리")
+        self.assertEqual(build.direction_text("담양 → 동강대"), "담양→동강대")
 
     def test_out_of_range(self):
         self.assertIsNone(build.normalize(item("X", 0, 0)))

@@ -32,6 +32,7 @@ ATTRIBUTION = (
 )
 
 ARROW = re.compile(r"\(([^()]*?(?:→|->|⇒|➝|➡)[^()]*?)\)")
+ARROW_BARE = re.compile(r"[^(),:]*(?:→|->|⇒|➝|➡)[^(),:]*")
 
 
 # ---------- 정규화 ----------
@@ -82,9 +83,15 @@ def direction_text(place: str | None) -> str | None:
     if not place:
         return None
     m = ARROW.search(place)
-    if not m:
-        return None
-    return re.sub(r"\s*(?:->|⇒|➝|➡)\s*", "→", m.group(1)).strip()
+    if m:
+        s = m.group(1)
+    else:
+        # 괄호 없이 쓰거나 괄호를 닫지 않은 경우: 화살표 앞뒤로 구분자((, ), 쉼표, 콜론)까지
+        m = ARROW_BARE.search(place)
+        if not m:
+            return None
+        s = m.group(0)
+    return re.sub(r"\s*(?:→|->|⇒|➝|➡)\s*", "→", s).strip() or None
 
 
 def normalize(item: dict) -> dict | None:
