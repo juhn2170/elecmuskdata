@@ -1,0 +1,81 @@
+name: collect
+
+on:
+  schedule:
+    # 매일 05:23 KST (= 20:23 UTC). 정시를 피해 예약 지연·누락을 줄인다.
+    - cron: "23 20 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # Release 게시, 실행 기록 커밋
+  actions: write    # 워크플로 재활성화 (60일 무활동 대비)
+
+concurrency:
+  group: collect
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: cameras-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 테스트
+        run: python -m unittest discover -s tests
+
+      - name: 지난 게시본 내려받기
+        run: |
+          mkdir -p prev
+          gh release download "$TAG" -p cameras.db -p version.json -D prev || echo "지난 게시본 없음 (첫 게시)"
+
+      - name: 수집
+        env:
+          DATA_GO_KR_SERVICE_KEY: ${{ secrets.DATA_GO_KR_SERVICE_KEY }}
+        run: python scripts/fetch.py out/raw.json
+
+      - name: 정제와 DB 생성
+        id: build
+        run: |
+          python scripts/build.py out/raw.json prev out
+          echo "status=$(python -c "import json;print(json.load(open('out/run.json'))['status'])")" >> "$GITHUB_OUTPUT"
+
+      - name: Release 게시
+        if: steps.build.outputs.status == 'published'
+        run: |
+          NOTES=$(python - <<'EOF'
+          import json
+          v = json.load(open("out/version.json"))
+          print(f"버전 {v['version']} · {v['count']}건 (과속 {v['speed_count']}) · "
+                f"추가 {v['added']} / 삭제 {v['removed']} / 변경 {v['changed']}\n\n{v['attribution']}")
+          EOF
+          )
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "카메라 데이터 (최신)" --notes "$NOTES" --latest
+          fi
+          # DB를 먼저 올리고 version.json을 마지막에 올린다 (앱이 새 버전을 보면 DB는 이미 준비됨)
+          gh release upload "$TAG" out/cameras.db out/changes.json --clobber
+          gh release upload "$TAG" out/version.json --clobber
+          gh release edit "$TAG" --notes "$NOTES"
+
+      - name: 실행 기록 커밋
+        if: always()
+        run: |
+          python scripts/runlog.py out logs/runs.tsv
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add logs/runs.tsv
+          git commit -m "실행 기록 $(TZ=Asia/Seoul date +%F)" || exit 0
+          git pull --rebase
+          git push
+
+      - name: 워크플로 재활성화 (60일 무활동 대비)
+        if: always()
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/collect.yml/enable" || true
