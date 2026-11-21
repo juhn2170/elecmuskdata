@@ -138,6 +138,47 @@ class BuildTest(unittest.TestCase):
         self.assertEqual((code, run["status"]), (2, "blocked"))
 
 
+class SectionTest(unittest.TestCase):
+    def hw(self, no, place, pos, lat=36.5, limit="110"):
+        return item(no, lat, 127.0, roadKnd="고속국도", roadRouteNm="서해안고속도로", itlpc=place,
+                    regltSctnLcSe=pos, lmttVe=limit)
+
+    def test_route_name(self):
+        self.assertEqual(build.route_name("서해안선"), build.route_name("15번 서해안고속도로"))
+        self.assertEqual(build.route_name("수도권제2순환선(파주-양주)"), "수도권제2순환")
+
+    def test_match(self):
+        cams = [build.normalize(x) for x in (
+            self.hw("A", "서해안고속도로 302.5km 시점 (목포→서울)", "1"),
+            self.hw("B", "서해안고속도로 312.3km 종점 (목포→서울)", "2", lat=36.6, limit="100"),
+            self.hw("C", "서해안고속도로 302.6km 시점 (서울→목포)", "1"),   # 반대 방향
+        )]
+        build.assign_keys(cams)
+        sec = {"route": "서해안선", "direction": "서울", "start_km": 302.8, "end_km": 312.0,
+               "start_place": "발안IC 인근", "end_place": "비봉IC 인근", "length_km": 9.2}
+        far = dict(sec, start_km=200.0, end_km=210.0)
+        s, f = build.match_sections([sec, far], cams)
+        keys = {c["manage_no"]: c["key"] for c in cams}
+        self.assertEqual((s["start_key"], s["end_key"], s["match"]), (keys["A"], keys["B"], "both"))
+        self.assertEqual((s["limit_kmh"], s["ambiguous"]), (100, 0))
+        self.assertEqual((f["match"], f["start_key"]), ("none", None))
+
+    def test_section_kept_when_download_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            prev, raw, kec = os.path.join(d, "prev"), os.path.join(d, "raw.json"), os.path.join(d, "kec.csv")
+            os.makedirs(prev)
+            write_raw(raw, sample())
+            with open(kec, "w", encoding="utf-8") as f:
+                f.write("노선,방향,시점,시점인근시설물,종점,종점인근시설물,연장\n서해안선,서울,1,a,2,b,1\n")
+            build.build(raw, prev, os.path.join(d, "o1"), kec)
+            for n in ("cameras.db", "version.json"):
+                os.replace(os.path.join(d, "o1", n), os.path.join(prev, n))
+            code = build.build(raw, prev, os.path.join(d, "o2"))           # CSV 없음
+            with open(os.path.join(d, "o2", "run.json"), encoding="utf-8") as f:
+                run = json.load(f)
+            self.assertEqual((code, run["status"], run["sections"]), (0, "unchanged", 1))
+
+
 class RunLogTest(unittest.TestCase):
     def test_trim_365_days(self):
         with tempfile.TemporaryDirectory() as d:

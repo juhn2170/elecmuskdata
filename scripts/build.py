@@ -1,7 +1,8 @@
 """내려받은 원본(raw.json)을 정제해서 cameras.db, version.json, changes.json, run.json 을 만든다.
 
-사용: python scripts/build.py RAW_JSON PREV_DIR OUT_DIR
+사용: python scripts/build.py RAW_JSON PREV_DIR OUT_DIR [KEC_CSV]
   PREV_DIR: 지난번 Release의 cameras.db, version.json 이 있는 폴더 (없으면 첫 게시)
+  KEC_CSV:  한국도로공사 구간단속 CSV (없으면 지난 게시본의 구간을 유지)
 
 종료 코드
   0  게시할 새 데이터 있음 (run.json status=published)
@@ -28,7 +29,9 @@ LON_RANGE = (124.0, 132.0)
 GRID = 100                 # 0.01도 격자 (위도 약 1.1km, 경도 약 0.9km)
 ATTRIBUTION = (
     "출처: 공공데이터포털(data.go.kr) 전국무인교통단속카메라표준데이터. "
-    "이용허락범위: 저작자표시. 원본을 정제·가공한 데이터임."
+    "이용허락범위: 저작자표시. "
+    "구간단속: 공공데이터포털 한국도로공사_구간단속현황 (이용허락범위 제한 없음). "
+    "원본을 정제·가공한 데이터임."
 )
 
 ARROW = re.compile(r"\(([^()]*?(?:→|->|⇒|➝|➡)[^()]*?)\)")
@@ -177,13 +180,100 @@ CREATE TABLE camera (
 CREATE INDEX camera_grid ON camera(grid_y, grid_x);
 CREATE TABLE section (
   id INTEGER PRIMARY KEY,
-  start_key TEXT, end_key TEXT, length_km REAL, limit_kmh INTEGER, source TEXT
+  route TEXT, direction TEXT, start_km REAL, end_km REAL,
+  start_place TEXT, end_place TEXT, length_km REAL,
+  start_key TEXT, end_key TEXT, limit_kmh INTEGER,
+  match TEXT NOT NULL, ambiguous INTEGER NOT NULL, source TEXT NOT NULL
 );
 CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT);
 """
 
 
-def write_db(path: str, rows: list[dict], meta: dict) -> None:
+# ---------- 구간단속 (한국도로공사) ----------
+
+SECTION_COLUMNS = ["route", "direction", "start_km", "end_km", "start_place", "end_place", "length_km",
+                   "start_key", "end_key", "limit_kmh", "match", "ambiguous", "source"]
+KM = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*(?:km|k)(?![a-z가-힣])", re.I)
+MATCH_KM = 1.0   # 이정(km) 차이 허용 범위
+
+
+def route_name(s: str | None) -> str:
+    """'서해안선', '서해안고속도로', '15번 서해안고속도로' → '서해안'."""
+    s = re.sub(r"\(.*?\)", "", s or "")
+    s = re.sub(r"^\d+번\s*", "", s.strip()).replace(" ", "")
+    return re.sub(r"(고속도로|선)$", "", s)
+
+
+def read_kec(path: str) -> list[dict]:
+    import csv
+    with open(path, encoding="utf-8", newline="") as f:
+        out = []
+        for r in csv.DictReader(f):
+            r = {k.strip(): text(v) for k, v in r.items() if k}
+            out.append({"route": r.get("노선"), "direction": r.get("방향"),
+                        "start_km": number(r.get("시점")), "end_km": number(r.get("종점")),
+                        "start_place": r.get("시점인근시설물"), "end_place": r.get("종점인근시설물"),
+                        "length_km": number(r.get("연장"))})
+        return out
+
+
+def match_sections(sections: list[dict], cameras: list[dict]) -> list[dict]:
+    """도로공사 데이터에는 좌표가 없다. 표준데이터의 고속도로 카메라 중
+    같은 노선 + 설치장소에 적힌 이정(km)이 1km 이내 + 시점/종점 구분이 맞고 + 방향이 반대가 아닌 것을 찾는다.
+    여러 개면 가장 가까운 것을 쓰고 ambiguous=1로 표시한다 (기획서 5.3, 🟡)."""
+    highway = []
+    for c in cameras:
+        if c["road_kind"] != "고속국도" and "고속도로" not in (c["road_name"] or ""):
+            continue
+        m = KM.search(c["place"] or "")
+        if m:
+            highway.append((route_name(c["road_name"]), float(m.group(1)), c))
+
+    def pick(s: dict, km: float | None, pos: str) -> list[tuple[float, dict]]:
+        if km is None:
+            return []
+        found = []
+        for r, ckm, c in highway:
+            if r != route_name(s["route"]) or abs(ckm - km) > MATCH_KM:
+                continue
+            if c["section_pos"] and c["section_pos"] != pos:
+                continue
+            dt, d = c["direction_text"], s["direction"]
+            if dt and "→" in dt and d:
+                left, right = dt.split("→", 1)
+                if d in left and d not in right:
+                    continue
+            found.append((abs(ckm - km), c))
+        return sorted(found, key=lambda x: (x[0], x[1]["key"]))
+
+    out = []
+    for s in sections:
+        cs, ce = pick(s, s["start_km"], "1"), pick(s, s["end_km"], "2")
+        start, end = (cs[0][1] if cs else None), (ce[0][1] if ce else None)
+        limits = [c["limit_kmh"] for c in (start, end) if c and c["limit_kmh"]]
+        out.append(dict(s, start_key=start and start["key"], end_key=end and end["key"],
+                        limit_kmh=min(limits) if limits else None,
+                        match="both" if start and end else "start" if start else "end" if end else "none",
+                        ambiguous=int(len(cs) > 1 or len(ce) > 1), source="한국도로공사"))
+    return out
+
+
+def prev_sections(prev_dir: str) -> list[dict]:
+    path = os.path.join(prev_dir, "cameras.db")
+    if not os.path.exists(path):
+        return []
+    con = sqlite3.connect(path)
+    try:
+        con.row_factory = sqlite3.Row
+        cols = {r[1] for r in con.execute("PRAGMA table_info(section)")}
+        if not set(SECTION_COLUMNS) <= cols:
+            return []
+        return [dict(r) for r in con.execute(f"SELECT {','.join(SECTION_COLUMNS)} FROM section ORDER BY id")]
+    finally:
+        con.close()
+
+
+def write_db(path: str, rows: list[dict], meta: dict, sections: list[dict] | None = None) -> None:
     if os.path.exists(path):
         os.remove(path)
     con = sqlite3.connect(path)
@@ -192,6 +282,10 @@ def write_db(path: str, rows: list[dict], meta: dict) -> None:
         con.executemany(
             f"INSERT INTO camera ({','.join(COLUMNS)}) VALUES ({','.join('?' * len(COLUMNS))})",
             [[r[c] for c in COLUMNS] for r in rows],
+        )
+        con.executemany(
+            f"INSERT INTO section ({','.join(SECTION_COLUMNS)}) VALUES ({','.join('?' * len(SECTION_COLUMNS))})",
+            [[s[c] for c in SECTION_COLUMNS] for s in sections or []],
         )
         con.executemany("INSERT INTO meta VALUES (?, ?)",
                         [(k, v if isinstance(v, str) else json.dumps(v, ensure_ascii=False))
@@ -237,7 +331,8 @@ def write_json(path: str, data: dict) -> None:
 
 # ---------- 실행 ----------
 
-def build(raw_path: str, prev_dir: str, out_dir: str, now: datetime | None = None) -> int:
+def build(raw_path: str, prev_dir: str, out_dir: str, kec_path: str | None = None,
+          now: datetime | None = None) -> int:
     now = now or datetime.now(KST)
     os.makedirs(out_dir, exist_ok=True)
     with open(raw_path, encoding="utf-8") as f:
@@ -255,9 +350,18 @@ def build(raw_path: str, prev_dir: str, out_dir: str, now: datetime | None = Non
     rows.sort(key=lambda r: r["key"])
     # 중복 제거는 여러 출처가 같은 장비를 가리킬 때만 한다 (기획서 5.3). 지금은 출처가 하나라 하지 않는다.
 
+    # 구간단속: 도로공사 CSV를 못 받았으면 지난 게시본의 구간을 그대로 쓴다.
+    if kec_path and os.path.exists(kec_path):
+        sections, section_source = match_sections(read_kec(kec_path), rows), "새로 받음"
+    else:
+        sections, section_source = prev_sections(prev_dir), "지난 게시본 유지"
+    section_matched = sum(1 for s in sections if s["match"] == "both")
+
     new_hashes = {r["key"]: row_hash({c: r[c] for c in COLUMNS}) for r in rows}
-    data_hash = hashlib.sha256("\n".join(f"{k}:{v}" for k, v in sorted(new_hashes.items()))
-                               .encode("utf-8")).hexdigest()
+    data_hash = hashlib.sha256(
+        ("\n".join(f"{k}:{v}" for k, v in sorted(new_hashes.items())) + "\n#section\n"
+         + "\n".join(row_hash({c: s[c] for c in SECTION_COLUMNS}) for s in sections)).encode("utf-8")
+    ).hexdigest()
 
     prev_version, prev_hashes = read_prev(prev_dir)
     added = len(new_hashes.keys() - prev_hashes.keys())
@@ -271,6 +375,7 @@ def build(raw_path: str, prev_dir: str, out_dir: str, now: datetime | None = Non
         "source_total": raw.get("total_count", len(items)),
         "count": count, "dropped_coords": dropped,
         "added": added, "removed": removed, "changed": changed,
+        "sections": len(sections), "sections_matched": section_matched, "section_source": section_source,
     }
 
     def finish(status: str, note: str, code_: int) -> int:
@@ -302,11 +407,11 @@ def build(raw_path: str, prev_dir: str, out_dir: str, now: datetime | None = Non
         "schema_version": str(SCHEMA_VERSION),
         "version": version,
         "generated_at": run["run_at"],
-        "source_counts": {"data.go.kr": count},
+        "source_counts": {"data.go.kr": count, "한국도로공사_구간단속현황": len(sections)},
         "dropped_coords": str(dropped),
         "ref_dates_by_institution": dict(sorted(ref_dates.items())),
         "attribution": ATTRIBUTION,
-    })
+    }, sections)
 
     changes = {"version": version, "previous": (prev_version or {}).get("version"),
                "added": added, "removed": removed, "changed": changed}
@@ -321,6 +426,7 @@ def build(raw_path: str, prev_dir: str, out_dir: str, now: datetime | None = Non
         "db_sha256": sha256_file(db_path),
         "db_size": os.path.getsize(db_path),
         "added": added, "removed": removed, "changed": changed,
+        "sections": len(sections), "sections_matched": section_matched,
         "attribution": ATTRIBUTION,
     })
     run["version"] = version
@@ -328,10 +434,10 @@ def build(raw_path: str, prev_dir: str, out_dir: str, now: datetime | None = Non
 
 
 def main() -> int:
-    if len(sys.argv) != 4:
+    if len(sys.argv) not in (4, 5):
         print(__doc__)
         return 64
-    return build(*sys.argv[1:4])
+    return build(*sys.argv[1:5])
 
 
 if __name__ == "__main__":

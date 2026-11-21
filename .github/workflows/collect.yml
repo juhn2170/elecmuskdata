@@ -41,10 +41,14 @@ jobs:
           DATA_GO_KR_SERVICE_KEY: ${{ secrets.DATA_GO_KR_SERVICE_KEY }}
         run: python scripts/fetch.py out/raw.json
 
+      - name: 구간단속 수집 (한국도로공사, 실패해도 지난 게시본 유지)
+        continue-on-error: true
+        run: python scripts/fetch_kec.py out/kec_sections.csv
+
       - name: 정제와 DB 생성
         id: build
         run: |
-          python scripts/build.py out/raw.json prev out
+          python scripts/build.py out/raw.json prev out out/kec_sections.csv
           echo "status=$(python -c "import json;print(json.load(open('out/run.json'))['status'])")" >> "$GITHUB_OUTPUT"
 
       - name: Release 게시
